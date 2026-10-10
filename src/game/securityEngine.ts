@@ -27,8 +27,6 @@ export function analyzeSecurity(
   const findings: SecurityFinding[] = [];
 
   const has = (t: string) => nodes.some((n) => n.type === t);
-  const hasControl = (t: string, c: SecurityControlType) =>
-    nodes.some((n) => n.type === t && n.data?.securityControls?.includes(c));
 
   // TLS check: frontend must have TLS
   const frontendNodes = nodes.filter((n) => n.type === 'frontend');

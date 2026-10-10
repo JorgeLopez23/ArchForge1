@@ -1,6 +1,6 @@
 import type { SimulationResult, IncidentDef, IncidentType } from '@/game/types';
 import * as Icons from 'lucide-react';
-import { Play, Square, AlertTriangle, Zap, Activity, DollarSign } from 'lucide-react';
+import { Play, Square, AlertTriangle, Zap, Activity, DollarSign, TrendingDown, Clock } from 'lucide-react';
 
 interface Props {
   simulation: SimulationResult | null;
@@ -50,6 +50,46 @@ export function SimulationPanel({
           </span>
         </div>
       </div>
+
+      {/* New metrics row */}
+      {simulation && (
+        <div className="grid grid-cols-3 gap-2 mb-3">
+          <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-2">
+            <div className="flex items-center gap-1 mb-0.5">
+              <TrendingDown size={10} className="text-emerald-400" />
+              <span className="text-[9px] uppercase tracking-wider text-slate-500">Throughput</span>
+            </div>
+            <span className="text-xs font-bold text-white">{simulation.throughput} req/s</span>
+          </div>
+          <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-2">
+            <div className="flex items-center gap-1 mb-0.5">
+              <Clock size={10} className="text-amber-400" />
+              <span className="text-[9px] uppercase tracking-wider text-slate-500">Latencia</span>
+            </div>
+            <span className="text-xs font-bold text-white">{simulation.totalLatency} ms</span>
+          </div>
+          <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-2">
+            <div className="flex items-center gap-1 mb-0.5">
+              <AlertTriangle size={10} className="text-red-400" />
+              <span className="text-[9px] uppercase tracking-wider text-slate-500">Errores</span>
+            </div>
+            <span className={`text-xs font-bold ${simulation.totalErrors > 0 ? 'text-red-400' : 'text-white'}`}>
+              {simulation.totalErrors} req/s
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Bottleneck detection */}
+      {simulation && simulation.bottleneck && (
+        <div className="mb-3 flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-2">
+          <Zap size={12} className="text-red-400 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <span className="text-[10px] uppercase tracking-wider text-red-400 font-semibold">Cuello de botella</span>
+            <p className="text-xs text-red-300 font-semibold">{simulation.bottleneck}</p>
+          </div>
+        </div>
+      )}
 
       {/* Simulate button */}
       {!isSimulating ? (

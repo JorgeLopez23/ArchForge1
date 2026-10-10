@@ -410,6 +410,16 @@ export function evaluateArchitecture(
     total: Math.round((cappedScalability + cappedAvailability + cappedSecurity + cappedCost + cappedComplexity) / 5),
   };
 
+  // Security analysis
+  const securityFindings = analyzeSecurity(rfNodes, rfEdges);
+  security -= securityFindings.filter((f) => f.severity === 'error').length * 10;
+  security -= securityFindings.filter((f) => f.severity === 'warning').length * 5;
+  addScore('security', `Análisis de seguridad: ${securityFindings.length} hallazgo(s)`, -securityFindings.filter((f) => f.severity !== 'good').length * 5);
+
+  // Build symptoms from issues
+  const symptoms: string[] = [];
+  issues.filter((i) => i.severity === 'error').forEach((i) => symptoms.push(i.message));
+
   const passed = scores.total >= level.targetScore;
   const errorCount = issues.filter((i) => i.severity === 'error').length;
   const passedWithErrors = passed && errorCount === 0 && !budgetExceeded;
@@ -423,7 +433,7 @@ export function evaluateArchitecture(
     summary = `Puntuación: ${scores.total}/100. Necesitas al menos ${level.targetScore} para aprobar. Revisa los errores y vuelve a evaluar.`;
   }
 
-  return { scores, scoreDetails: details, issues, passed: passedWithErrors, summary, totalCost, budgetExceeded };
+  return { scores, scoreDetails: details, issues, securityFindings, symptoms, passed: passedWithErrors, summary, totalCost, budgetExceeded };
 }
 
 export function severityColor(severity: IssueSeverity): string {

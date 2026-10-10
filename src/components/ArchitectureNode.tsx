@@ -11,6 +11,19 @@ const STATUS_COLORS: Record<NodeStatus, { border: string; glow: string; badge: s
   down: { border: '#64748b', glow: '0 0 10px #64748b60', badge: 'bg-slate-600/40 text-slate-300', badgeText: 'CAÍDO' },
 };
 
+function UsageBar({ label, value, danger }: { label: string; value: number; danger: boolean }) {
+  const color = danger ? '#ef4444' : value > 80 ? '#f59e0b' : value > 50 ? '#10b981' : '#3b82f6';
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[8px] text-slate-500 w-7">{label}</span>
+      <div className="flex-1 h-1 rounded-full bg-slate-700/60 overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-300" style={{ width: `${value}%`, background: color }} />
+      </div>
+      <span className="text-[8px] font-semibold w-6 text-right" style={{ color }}>{value}%</span>
+    </div>
+  );
+}
+
 function ArchitectureNode({ data, selected }: NodeProps) {
   const componentType = COMPONENT_MAP[data.componentType];
   if (!componentType) return null;
@@ -33,9 +46,16 @@ function ArchitectureNode({ data, selected }: NodeProps) {
         ? `0 0 0 2px #fff, 0 0 20px ${componentType.color}80`
         : `0 4px 20px ${componentType.color}30`;
 
+  const cpuUsage: number = data.cpuUsage ?? 0;
+  const ramUsage: number = data.ramUsage ?? 0;
+  const netUsage: number = data.networkUsage ?? 0;
+  const receivedRps: number = data.receivedRps ?? 0;
+  const errors: number = data.errors ?? 0;
+  const showMetrics = status !== 'idle';
+
   return (
     <div
-      className={`relative rounded-xl border-2 px-4 py-3 min-w-[160px] transition-all duration-300 ${isDown ? 'opacity-50' : ''} ${isOverloaded ? 'animate-pulse' : ''}`}
+      className={`relative rounded-xl border-2 px-4 py-3 min-w-[170px] transition-all duration-300 ${isDown ? 'opacity-50' : ''} ${isOverloaded ? 'animate-pulse' : ''}`}
       style={{
         borderColor,
         background: `linear-gradient(135deg, ${componentType.color}25, ${componentType.color}10)`,
@@ -60,6 +80,18 @@ function ArchitectureNode({ data, selected }: NodeProps) {
       {status !== 'idle' && (
         <div className={`mt-1.5 inline-block rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wider ${statusStyle.badge}`}>
           {statusStyle.badgeText}
+        </div>
+      )}
+
+      {showMetrics && (
+        <div className="mt-2 space-y-1">
+          <div className="flex items-center justify-between text-[9px]">
+            <span className="text-slate-400">{receivedRps} req/s</span>
+            {errors > 0 && <span className="text-red-400 font-semibold">{errors} err/s</span>}
+          </div>
+          <UsageBar label="CPU" value={cpuUsage} danger={cpuUsage > 90} />
+          <UsageBar label="RAM" value={ramUsage} danger={ramUsage > 90} />
+          <UsageBar label="NET" value={netUsage} danger={netUsage > 90} />
         </div>
       )}
 

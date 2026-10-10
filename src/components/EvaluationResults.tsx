@@ -1,5 +1,5 @@
 import type { EvaluationResult } from '@/game/types';
-import { CheckCircle2, AlertTriangle, XCircle, Check } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, XCircle, Check, ShieldAlert } from 'lucide-react';
 
 interface Props {
   result: EvaluationResult | null;
@@ -51,6 +51,57 @@ export function EvaluationResults({ result }: Props) {
           </p>
         </div>
       </div>
+
+      {/* Symptoms (errors first, as learning prompts) */}
+      {result.symptoms.length > 0 && (
+        <div className="mb-3">
+          <h4 className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">Síntomas detectados</h4>
+          <div className="space-y-1.5">
+            {result.symptoms.map((sym, idx) => (
+              <div key={idx} className="rounded-lg border border-red-500/20 bg-red-500/5 p-2">
+                <div className="flex gap-2">
+                  <AlertTriangle size={12} className="shrink-0 mt-0.5 text-red-400" />
+                  <p className="text-xs text-slate-300 leading-relaxed">{sym}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Security findings */}
+      {result.securityFindings.length > 0 && (
+        <div className="mb-3">
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <ShieldAlert size={12} className="text-amber-400" />
+            <h4 className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Hallazgos de Seguridad</h4>
+          </div>
+          <div className="space-y-1.5">
+            {result.securityFindings.map((f, idx) => {
+              const Icon = ICON_MAP[f.severity];
+              const colorClass =
+                f.severity === 'error' ? 'text-red-400'
+                : f.severity === 'warning' ? 'text-amber-400'
+                : 'text-emerald-400';
+              const bgClass =
+                f.severity === 'error' ? 'border-red-500/20 bg-red-500/5'
+                : f.severity === 'warning' ? 'border-amber-500/20 bg-amber-500/5'
+                : 'border-emerald-500/20 bg-emerald-500/5';
+              return (
+                <div key={idx} className={`rounded-lg border p-2 ${bgClass}`}>
+                  <div className="flex gap-2">
+                    <Icon size={12} className={`shrink-0 mt-0.5 ${colorClass}`} />
+                    <div>
+                      <p className="text-xs text-slate-300 leading-relaxed">{f.message}</p>
+                      <p className="text-[10px] text-amber-500/60 leading-tight mt-0.5">Riesgo: {f.risk}</p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Issues list */}
       <div className="space-y-2">

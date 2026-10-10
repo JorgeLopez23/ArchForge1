@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
 import ReactFlow, {
   Background,
   BackgroundVariant,
@@ -19,7 +19,7 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { LEVELS } from '@/game/levels';
-import type { EvaluationResult, Level, SimulationResult, IncidentType, SimulationNodeState } from '@/game/types';
+import type { EvaluationResult, Level, SimulationResult, IncidentType, SimulationNodeState, SecurityControlType, WorkloadType } from '@/game/types';
 import { COMPONENT_MAP } from '@/game/componentTypes';
 import { evaluateArchitecture } from '@/game/evaluationEngine';
 import { runSimulation } from '@/game/simulationEngine';
@@ -31,13 +31,13 @@ import { LevelInfo } from '@/components/LevelInfo';
 import { LevelSelector } from '@/components/LevelSelector';
 import { PropertiesPanel } from '@/components/PropertiesPanel';
 import { SimulationPanel } from '@/components/SimulationPanel';
-import { Play, Trash2, RotateCcw, Trophy } from 'lucide-react';
+import { Play, Trash2, RotateCcw, Trophy, Undo2 } from 'lucide-react';
 
 let nodeIdCounter = 1;
 
 const nodeTypes = { architectureNode: ArchitectureNode };
 
-const STORAGE_KEY = 'architecture-quest-progress';
+const STORAGE_KEY = 'archforge-progress';
 
 interface SavedProgress {
   completedLevels: number[];
@@ -61,6 +61,11 @@ function saveProgress(completedLevels: Set<number>, currentLevelId: number) {
   } catch { /* ignore */ }
 }
 
+interface UndoEntry {
+  nodes: Node[];
+  edges: Edge[];
+}
+
 export function GameScreen() {
   const initialProgress = useRef(loadProgress());
   const [currentLevel, setCurrentLevel] = useState<Level>(
@@ -78,21 +83,60 @@ export function GameScreen() {
   const [isSimulating, setIsSimulating] = useState(false);
   const [activeIncident, setActiveIncident] = useState<IncidentType | null>(null);
   const [simInterval, setSimInterval] = useState<ReturnType<typeof setInterval> | null>(null);
+  const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
 
   const rfInstance = useRef<ReactFlowInstance | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
-  // Save progress whenever completed levels or current level changes
+  // Save progress
   useEffect(() => {
     saveProgress(completedLevels, currentLevel.id);
   }, [completedLevels, currentLevel.id]);
 
-  // Cleanup simulation interval on unmount
+  // Cleanup simulation interval
   useEffect(() => {
     return () => {
       if (simInterval) clearInterval(simInterval);
     };
   }, [simInterval]);
+
+  // Push to undo stack before a mutation
+  const pushUndo = useCallback(() => {
+    setUndoStack((prev) => [...prev.slice(-19), { nodes, edges }]);
+  }, [nodes, edges]);
+
+  const undo = useCallback(() => {
+    setUndoStack((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      setNodes(last.nodes);
+      setEdges(last.edges);
+      setEvaluation(null);
+      setSelectedNodeId(null);
+      return prev.slice(0, -1);
+    });
+  }, []);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKey = (e: globalThis.KeyboardEvent) => {
+      // Ctrl+Z / Cmd+Z = undo
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      // Delete / Backspace = delete selected node (but not when editing text)
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedNodeId) {
+        const target = e.target as HTMLElement;
+        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+        e.preventDefault();
+        handleDeleteNode(selectedNodeId);
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [selectedNodeId, undo]);
 
   const onNodesChange: OnNodesChange = useCallback(
     (changes: NodeChange[]) => setNodes((nds) => applyNodeChanges(changes, nds)),
@@ -106,10 +150,11 @@ export function GameScreen() {
 
   const onConnect: OnConnect = useCallback(
     (connection: Connection) => {
+      pushUndo();
       setEdges((eds) => addEdge({ ...connection, animated: true, style: { stroke: '#64748b', strokeWidth: 2 } }, eds));
       setEvaluation(null);
     },
-    []
+    [pushUndo]
   );
 
   const onDragOver = useCallback((e: DragEvent) => {
@@ -134,48 +179,78 @@ export function GameScreen() {
         id: `${componentType}-${nodeIdCounter++}`,
         type: 'architectureNode',
         position,
-        data: { componentType, label: ct.label, instances: 1, status: 'idle' },
+        data: {
+          componentType,
+          label: ct.label,
+          instances: 1,
+          status: 'idle',
+          vcpuPerInstance: ct.resources.vcpu,
+          ramPerInstance: ct.resources.ram,
+          networkPerInstance: ct.resources.network,
+          securityControls: [],
+        },
       };
 
+      pushUndo();
       setNodes((nds) => [...nds, newNode]);
       setEvaluation(null);
     },
-    []
+    [pushUndo]
   );
 
   const onInit = useCallback((instance: ReactFlowInstance) => {
     rfInstance.current = instance;
   }, []);
 
-  // Update node statuses from simulation
-  const applySimulationToNodes = useCallback((sim: SimulationResult) => {
+  const getWorkload = useCallback((): WorkloadType => {
+    return currentLevel.workload ?? 'cpu-bound';
+  }, [currentLevel]);
+
+  const getReadWriteRatio = useCallback((): number => {
+    return currentLevel.readWriteRatio ?? 0.7;
+  }, [currentLevel]);
+
+  // Run simulation and apply to nodes
+  const runSim = useCallback(() => {
+    const wl = getWorkload();
+    const rwr = getReadWriteRatio();
+    const sim = runSimulation(nodes, edges, currentLevel.requestsPerSecond, activeIncident, wl, rwr);
+    setSimulation(sim);
     setNodes((nds) =>
       nds.map((n) => {
-        const simNode = sim.nodes.find((sn) => sn.id === n.id);
-        if (!simNode) return n;
-        return { ...n, data: { ...n.data, status: simNode.status } };
+        const sn = sim.nodes.find((s) => s.id === n.id);
+        if (!sn) return n;
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            status: sn.status,
+            cpuUsage: sn.cpuUsage,
+            ramUsage: sn.ramUsage,
+            networkUsage: sn.networkUsage,
+            receivedRps: sn.receivedRps,
+            errors: sn.errors,
+          },
+        };
       })
     );
-  }, []);
+    return sim;
+  }, [nodes, edges, currentLevel, activeIncident, getWorkload, getReadWriteRatio]);
 
   const handleSimulate = useCallback(() => {
-    const sim = runSimulation(nodes, edges, currentLevel.requestsPerSecond, activeIncident);
-    setSimulation(sim);
-    applySimulationToNodes(sim);
+    runSim();
     setIsSimulating(true);
-
-    // Run periodic simulation to show traffic animation
     const interval = setInterval(() => {
       setEdges((eds) =>
         eds.map((e) => ({
           ...e,
           animated: true,
-          style: { ...e.style, stroke: sim.hasOverload ? '#ef4444' : '#10b981', strokeWidth: 2 },
+          style: { ...e.style, stroke: simulation?.hasOverload ? '#ef4444' : '#10b981', strokeWidth: 2 },
         }))
       );
     }, 500);
     setSimInterval(interval);
-  }, [nodes, edges, currentLevel, activeIncident, applySimulationToNodes]);
+  }, [runSim, simulation]);
 
   const handleStopSimulation = useCallback(() => {
     setIsSimulating(false);
@@ -183,9 +258,8 @@ export function GameScreen() {
       clearInterval(simInterval);
       setSimInterval(null);
     }
-    // Reset node statuses to idle
     setNodes((nds) =>
-      nds.map((n) => ({ ...n, data: { ...n.data, status: 'idle' } }))
+      nds.map((n) => ({ ...n, data: { ...n.data, status: 'idle', cpuUsage: 0, ramUsage: 0, networkUsage: 0, receivedRps: 0, errors: 0 } }))
     );
     setEdges((eds) =>
       eds.map((e) => ({
@@ -199,19 +273,20 @@ export function GameScreen() {
   const handleEvaluate = useCallback(() => {
     const result = evaluateArchitecture(nodes, edges, currentLevel.id);
     setEvaluation(result);
-    if (result.passed) {
+    if (result.passed && !currentLevel.isLab) {
       setCompletedLevels((prev) => {
         const next = new Set(prev);
         next.add(currentLevel.id);
         return next;
       });
-      if (currentLevel.id === LEVELS.length && !completedLevels.has(currentLevel.id)) {
+      if (currentLevel.id === LEVELS.filter(l => !l.isLab).length && !completedLevels.has(currentLevel.id)) {
         setShowVictory(true);
       }
     }
   }, [nodes, edges, currentLevel, completedLevels]);
 
   const handleClear = useCallback(() => {
+    pushUndo();
     setNodes([]);
     setEdges([]);
     setEvaluation(null);
@@ -220,9 +295,10 @@ export function GameScreen() {
     setActiveIncident(null);
     if (simInterval) { clearInterval(simInterval); setSimInterval(null); }
     setIsSimulating(false);
-  }, [simInterval]);
+  }, [simInterval, pushUndo]);
 
   const handleResetLevel = useCallback(() => {
+    pushUndo();
     setNodes([]);
     setEdges([]);
     setEvaluation(null);
@@ -231,7 +307,7 @@ export function GameScreen() {
     setActiveIncident(null);
     if (simInterval) { clearInterval(simInterval); setSimInterval(null); }
     setIsSimulating(false);
-  }, [simInterval]);
+  }, [simInterval, pushUndo]);
 
   const handleSelectLevel = useCallback((level: Level) => {
     setCurrentLevel(level);
@@ -242,11 +318,21 @@ export function GameScreen() {
     setSelectedNodeId(null);
     setActiveIncident(null);
     setShowVictory(false);
+    setUndoStack([]);
     if (simInterval) { clearInterval(simInterval); setSimInterval(null); }
     setIsSimulating(false);
   }, [simInterval]);
 
+  const handleDeleteNode = useCallback((nodeId: string) => {
+    pushUndo();
+    setNodes((nds) => nds.filter((n) => n.id !== nodeId));
+    setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
+    setEvaluation(null);
+    setSelectedNodeId(null);
+  }, [pushUndo]);
+
   const handleAdjustInstances = useCallback((nodeId: string, delta: number) => {
+    pushUndo();
     setNodes((nds) =>
       nds.map((n) => {
         if (n.id !== nodeId) return n;
@@ -256,55 +342,108 @@ export function GameScreen() {
       })
     );
     setEvaluation(null);
-    // Re-run simulation if active
     if (isSimulating) {
       setTimeout(() => {
         setNodes((nds) => {
-          const sim = runSimulation(nds, edges, currentLevel.requestsPerSecond, activeIncident);
+          const wl = getWorkload();
+          const rwr = getReadWriteRatio();
+          const sim = runSimulation(nds, edges, currentLevel.requestsPerSecond, activeIncident, wl, rwr);
           setSimulation(sim);
-          applySimulationToNodes(sim);
-          return nds;
+          return nds.map((n) => {
+            const sn = sim.nodes.find((s) => s.id === n.id);
+            if (!sn) return n;
+            return { ...n, data: { ...n.data, status: sn.status, cpuUsage: sn.cpuUsage, ramUsage: sn.ramUsage, networkUsage: sn.networkUsage, receivedRps: sn.receivedRps, errors: sn.errors } };
+          });
         });
       }, 0);
     }
-  }, [edges, isSimulating, currentLevel, activeIncident, applySimulationToNodes]);
+  }, [edges, isSimulating, currentLevel, activeIncident, pushUndo, getWorkload, getReadWriteRatio]);
+
+  const handleAdjustResource = useCallback((nodeId: string, resource: 'vcpu' | 'ram', delta: number) => {
+    pushUndo();
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (n.id !== nodeId) return n;
+        const key = resource === 'vcpu' ? 'vcpuPerInstance' : 'ramPerInstance';
+        const current = (n.data as Record<string, number>)[key] ?? 1;
+        const next = Math.max(1, current + delta);
+        return { ...n, data: { ...n.data, [key]: next } };
+      })
+    );
+    setEvaluation(null);
+  }, [pushUndo]);
+
+  const handleToggleSecurity = useCallback((nodeId: string, control: SecurityControlType) => {
+    pushUndo();
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (n.id !== nodeId) return n;
+        const controls: SecurityControlType[] = n.data.securityControls ?? [];
+        const has = controls.includes(control);
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            securityControls: has ? controls.filter((c) => c !== control) : [...controls, control],
+          },
+        };
+      })
+    );
+    setEvaluation(null);
+  }, [pushUndo]);
 
   const handleTriggerIncident = useCallback((incident: IncidentType) => {
     setActiveIncident(incident);
-    // Re-run simulation with incident
-    const sim = runSimulation(nodes, edges, currentLevel.requestsPerSecond, incident);
+    const wl = getWorkload();
+    const rwr = getReadWriteRatio();
+    const sim = runSimulation(nodes, edges, currentLevel.requestsPerSecond, incident, wl, rwr);
     setSimulation(sim);
-    applySimulationToNodes(sim);
-  }, [nodes, edges, currentLevel, applySimulationToNodes]);
+    setNodes((nds) =>
+      nds.map((n) => {
+        const sn = sim.nodes.find((s) => s.id === n.id);
+        if (!sn) return n;
+        return { ...n, data: { ...n.data, status: sn.status, cpuUsage: sn.cpuUsage, ramUsage: sn.ramUsage, networkUsage: sn.networkUsage, receivedRps: sn.receivedRps, errors: sn.errors } };
+      })
+    );
+  }, [nodes, edges, currentLevel, getWorkload, getReadWriteRatio]);
 
   const handleClearIncident = useCallback(() => {
     setActiveIncident(null);
     if (isSimulating) {
-      const sim = runSimulation(nodes, edges, currentLevel.requestsPerSecond, null);
+      const wl = getWorkload();
+      const rwr = getReadWriteRatio();
+      const sim = runSimulation(nodes, edges, currentLevel.requestsPerSecond, null, wl, rwr);
       setSimulation(sim);
-      applySimulationToNodes(sim);
-    } else {
-      // Reset node statuses
       setNodes((nds) =>
-        nds.map((n) => ({ ...n, data: { ...n.data, status: 'idle' } }))
+        nds.map((n) => {
+          const sn = sim.nodes.find((s) => s.id === n.id);
+          if (!sn) return n;
+          return { ...n, data: { ...n.data, status: sn.status, cpuUsage: sn.cpuUsage, ramUsage: sn.ramUsage, networkUsage: sn.networkUsage, receivedRps: sn.receivedRps, errors: sn.errors } };
+        })
+      );
+    } else {
+      setNodes((nds) =>
+        nds.map((n) => ({ ...n, data: { ...n.data, status: 'idle', cpuUsage: 0, ramUsage: 0, networkUsage: 0, receivedRps: 0, errors: 0 } }))
       );
       setSimulation(null);
     }
-  }, [nodes, edges, currentLevel, isSimulating, applySimulationToNodes]);
+  }, [nodes, edges, currentLevel, isSimulating, getWorkload, getReadWriteRatio]);
 
+  // Selected node state
+  const selectedNode = nodes.find((n) => n.id === selectedNodeId);
   const selectedSimNode: SimulationNodeState | null = (() => {
     if (!selectedNodeId || !simulation) return null;
     return simulation.nodes.find((n) => n.id === selectedNodeId) ?? null;
   })();
-
-  // For properties panel when not simulating, build a basic state
-  const selectedNode = nodes.find((n) => n.id === selectedNodeId);
   const selectedNodeState: SimulationNodeState | null = (() => {
     if (!selectedNode) return null;
     if (selectedSimNode) return selectedSimNode;
     const ct = COMPONENT_MAP[selectedNode.data.componentType];
     if (!ct) return null;
     const instances = selectedNode.data.instances ?? 1;
+    const vcpuPer = (selectedNode.data as Record<string, number>).vcpuPerInstance ?? ct.resources.vcpu;
+    const ramPer = (selectedNode.data as Record<string, number>).ramPerInstance ?? ct.resources.ram;
+    const netPer = (selectedNode.data as Record<string, number>).networkPerInstance ?? ct.resources.network;
     return {
       id: selectedNode.id,
       componentType: selectedNode.data.componentType,
@@ -312,12 +451,26 @@ export function GameScreen() {
       capacityPerInstance: ct.baseCapacity,
       totalCapacity: ct.baseCapacity * instances,
       receivedRps: 0,
+      outputRps: 0,
       status: 'idle',
       latency: ct.baseLatency,
       availability: ct.baseAvailability,
       cost: ct.baseCost * instances,
+      vcpu: vcpuPer * instances,
+      ram: ramPer * instances,
+      network: netPer * instances,
+      cpuUsage: 0,
+      ramUsage: 0,
+      networkUsage: 0,
+      errors: 0,
+      oomRisk: false,
     };
   })();
+
+  // Detect if deleting the selected node would also remove connections
+  const selectedNodeEdgeCount = selectedNodeId
+    ? edges.filter((e) => e.source === selectedNodeId || e.target === selectedNodeId).length
+    : 0;
 
   return (
     <div className="h-screen w-screen flex flex-col bg-slate-950 overflow-hidden">
@@ -330,9 +483,9 @@ export function GameScreen() {
             </div>
             <div>
               <h1 className="text-lg font-black text-white leading-tight tracking-tight">
-                Architecture <span className="text-blue-400">Quest</span>
+                Arch<span className="text-blue-400">Forge</span>
               </h1>
-              <p className="text-[10px] text-slate-500 uppercase tracking-widest">Simulador de arquitectura de software</p>
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest">Laboratorio de arquitectura de software</p>
             </div>
           </div>
 
@@ -357,9 +510,18 @@ export function GameScreen() {
           {/* Toolbar */}
           <div className="shrink-0 flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-900/30">
             <p className="text-xs text-slate-500">
-              Arrastra componentes desde la izquierda. Conéctalos arrastrando desde los puntos en los bordes de cada nodo.
+              Arrastra componentes desde la izquierda. Conéctalos arrastrando desde los bordes. Selecciona un nodo y presiona Supr para eliminarlo. Ctrl+Z deshace.
             </p>
             <div className="flex items-center gap-2">
+              <button
+                onClick={undo}
+                disabled={undoStack.length === 0}
+                className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                title="Deshacer (Ctrl+Z)"
+              >
+                <Undo2 size={13} />
+                Deshacer
+              </button>
               <button
                 onClick={handleResetLevel}
                 className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-700 transition-colors"
@@ -396,6 +558,11 @@ export function GameScreen() {
               onInit={onInit}
               onNodeClick={(_, n) => setSelectedNodeId(n.id)}
               onPaneClick={() => setSelectedNodeId(null)}
+              onEdgeClick={(_, e) => {
+                pushUndo();
+                setEdges((eds) => eds.filter((ed) => ed.id !== e.id));
+                setEvaluation(null);
+              }}
               fitView
               defaultEdgeOptions={{ animated: true, style: { stroke: '#64748b', strokeWidth: 2 } }}
               className="bg-slate-950"
@@ -440,6 +607,9 @@ export function GameScreen() {
               node={selectedNodeState}
               onClose={() => setSelectedNodeId(null)}
               onAdjustInstances={handleAdjustInstances}
+              onAdjustResource={handleAdjustResource}
+              onToggleSecurity={handleToggleSecurity}
+              onDelete={handleDeleteNode}
             />
           )}
           <EvaluationResults result={evaluation} />
@@ -455,7 +625,7 @@ export function GameScreen() {
             </div>
             <h2 className="text-2xl font-black text-white mb-2">¡Felicidades!</h2>
             <p className="text-sm text-slate-400 mb-6">
-              Has completado todos los niveles de Architecture Quest. Ahora entiendes los fundamentos de arquitectura de software y system design.
+              Has completado todos los casos de ArchForge. Ahora entiendes los fundamentos de arquitectura de software y system design. El Laboratorio sigue abierto para seguir experimentando.
             </p>
             <button
               onClick={() => setShowVictory(false)}
